@@ -1,145 +1,151 @@
 # kph-serena-agents
 
-Agentes de IA que lêem dados do restaurante **Madonna Cucina** via Serena (API REST em Railway) e gravam resultados no Supabase do **kph-os** (holding).
+Engine de inteligência do Orkestri embarcada dentro da Serena — célula Comercial/Ruptura do Grupo KPH.
 
----
+## Princípio central
 
-## Propósito
-
-Liga **Serena** (IA do restaurante) → **kph-os** (painel de inteligência da holding).
-
-Executa diariamente às 06:00 BRT via GitHub Actions, analisando:
-- Ocupação e reservas
-- Funil comercial (leads vs meta)
-- NPS consolidado
-- Eficiência da automação (handoffs)
-
-Gera um **score 0-100 por dimensão** + **score final ponderado** + **insight em português** para o painel kph-os.
-
----
-
-## STEP 0 — Fonte de dados (auditoria realizada)
-
-**Fonte: REST API Serena (Railway)** — não há acesso direto ao banco de dados.
-
-| Parâmetro | Valor |
-|-----------|-------|
-| Base URL | `https://restaurant-ai-production-bb5d.up.railway.app` |
-| Auth | `X-Admin-Secret: kph@serena2026` |
-| restaurant_id | `madonna_cucina` |
-
-### Endpoints utilizados
-
-| Endpoint | Agente |
-|----------|--------|
-| `GET /api/contacts/stats` | nps-tracker, funil-comercial-analyzer |
-| `GET /api/contacts/funil-stats` | funil-comercial-analyzer |
-| `GET /api/serena/metrics?periodo=30d` | handoffs-analyzer |
-| `GET /api/serena/handoffs/categorizados?periodo=30d` | handoffs-analyzer |
-| `GET /api/agenda/madonna_cucina/ocupacao?mes=YYYY-MM` | reservas-monitor |
-| `GET /api/agenda/madonna_cucina/reservas?data=YYYY-MM-DD` | reservas-monitor |
-| `GET /api/reports?rid=madonna_cucina&days=30` | nps-tracker |
-
----
-
-## Como os agentes funcionam
+O Orkestri roda **dentro da Serena**: lê os dados do Supabase da Serena (Madonna Cucina), analisa via Claude Haiku e grava os resultados no **mesmo** Supabase. Fonte e destino são o mesmo banco. Nenhuma integração com o kph-os por enquanto.
 
 ```
-scripts/run-all.ts
-  └── agents/performance-scorer.ts
-        ├── agents/reservas-monitor.ts        (30%)
-        ├── agents/funil-comercial-analyzer.ts (30%)
-        ├── agents/nps-tracker.ts             (20%)
-        └── agents/handoffs-analyzer.ts       (20%)
+Supabase Serena (fgntcrxuhfwcauvahaiz)
+    lê                       grava
+  contacts              orkestri_runs
+  conversations         orkestri_scores
+  handoff_sessions      orkestri_insights
+  serena_metrics        orkestri_learning
+  reservas
 ```
 
-Cada agente:
-1. Busca dados via `lib/serena-source.ts`
-2. Monta prompt e chama **claude-haiku-4-5-20251001**
-3. Recebe JSON `{ score, insight, data }`
-4. Registra via `lib/run-agent.ts` → Supabase `agent_runs`
+## Schema descoberto (04/06/2026)
 
-O `performance-scorer` agrega os 4 scores (média ponderada) e grava:
-- `kph_intelligence_scores` — score final + breakdown
-- `kph_insights` — insight consolidado
+| Tabela | Linhas | Descrição |
+|---|---|---|
+| `contacts` | 185 | Leads/clientes — `lead_score`, `estagio_kanban`, `ltv_total` |
+| `conversations` | 2157 | Mensagens brutas WhatsApp |
+| `handoff_sessions` | 112 | Transferências humano — `motivo` (texto livre), `status` |
+| `serena_metrics` | 624 | Métricas por conversa — `intencao_detectada`, `handoff_acionado`, `custo_usd` |
+| `reservas` | 8 | Reservas own-system (status: confirmada/pendente/cancelada) |
+| `faq_items` | 6 | Base de conhecimento |
+| `operadores` | 2 | Operadores do painel |
 
----
+> `lead_score` e `conversa_resolvida` estão 100% NULL — campos ainda não populados pela Serena. Os agentes documentam isso explicitamente nos seus outputs.
 
-## Secrets necessários
+## Tabelas de destino (orkestri_*)
 
-| Secret | Descrição |
-|--------|-----------|
-| `ANTHROPIC_API_KEY` | Chave Anthropic para claude-haiku |
-| `KPH_SUPABASE_URL` | URL do projeto Supabase kph-os |
-| `KPH_SUPABASE_SERVICE_ROLE_KEY` | Service role key do Supabase kph-os |
-| `SERENA_API_URL` | Base URL da API Serena (Railway) |
-| `SERENA_API_KEY` | Header `X-Admin-Secret` da Serena |
-| `KPH_API_SECRET` | Bearer token para `POST /api/agents/run` no kph-os |
-| `DISCORD_WEBHOOK_ORQUESTRADOR` | Webhook Discord para alertas de falha |
+Criadas via migration direta no Supabase da Serena em 04/06/2026:
 
----
+| Tabela | Descrição |
+|---|---|
+| `orkestri_runs` | Log de cada execução de agente (module, agent_name, status, result jsonb) |
+| `orkestri_scores` | Score consolidado por módulo (score 0-100, breakdown jsonb) |
+| `orkestri_insights` | Insight textual diário por módulo |
+| `orkestri_learning` | Propostas de melhoria geradas pelo Learning Machine (status: pending/approved/dismissed) |
 
-## Resultados no kph-os
+Todas com RLS habilitado, policy `TO authenticated`.
 
-Os agentes gravam em 3 tabelas do Supabase kph-os:
+## Agentes
 
-| Tabela | Conteúdo |
-|--------|----------|
-| `agent_runs` | Log de cada execução (status, resultado, timestamp) |
-| `kph_intelligence_scores` | Score diário por módulo + breakdown por agente |
-| `kph_insights` | Insight em linguagem natural, score, período |
+| Agente | Arquivo | Fonte | Score |
+|---|---|---|---|
+| reservas-monitor | `agents/reservas-monitor.ts` | `reservas` | confirmadas/(total-canceladas)×100 |
+| funil-comercial-analyzer | `agents/funil-comercial-analyzer.ts` | `contacts` | (qualificado+proposta+fechado)/total×100 |
+| nps-tracker | `agents/nps-tracker.ts` | `contacts` (proxy) | NPS estimado normalizado 0-100 |
+| handoffs-analyzer | `agents/handoffs-analyzer.ts` | `handoff_sessions` + `serena_metrics` | taxa de resolução autônoma×100 |
+| learning-machine | `agents/learning-machine.ts` | handoffs + metrics | propostas inseridas×20 (máx 100) |
+| performance-scorer | `agents/performance-scorer.ts` | `orkestri_runs` (agentes 1-4) | média ponderada 20/30/20/30 |
 
-Ver `kph-os-integration.md` para DDL das tabelas e rotas de API necessárias.
+**learning-machine** é o coração do Orkestri: todo dia analisa os padrões da Serena e gera propostas concretas (FAQ, ajuste de prompt, nova intenção) que o time aprova no painel.
 
----
+## Pesos do score comercial
 
-## Como rodar localmente
-
-```bash
-# 1. Clonar e instalar
-git clone https://github.com/ikeguimaraes-dot/kph-serena-agents.git
-cd kph-serena-agents
-npm install
-
-# 2. Configurar variáveis de ambiente
-cp .env.example .env
-# Editar .env com suas credenciais
-
-# 3. Executar
-npm run dev
+```
+reservas:  20%
+funil:     30%
+nps:       20%
+handoffs:  30%
 ```
 
-### Rodar agente individual
-
-```bash
-npx ts-node agents/reservas-monitor.ts
-npx ts-node agents/funil-comercial-analyzer.ts
-npx ts-node agents/nps-tracker.ts
-npx ts-node agents/handoffs-analyzer.ts
-npx ts-node agents/performance-scorer.ts
-```
-
----
-
-## Estrutura do projeto
+## Estrutura
 
 ```
 kph-serena-agents/
 ├── agents/
-│   ├── reservas-monitor.ts         # Ocupação e reservas
-│   ├── funil-comercial-analyzer.ts # Leads vs meta
-│   ├── nps-tracker.ts              # NPS normalizado
-│   ├── handoffs-analyzer.ts        # Eficiência automação
-│   └── performance-scorer.ts       # Orquestrador + score final
+│   ├── reservas-monitor.ts
+│   ├── funil-comercial-analyzer.ts
+│   ├── nps-tracker.ts
+│   ├── handoffs-analyzer.ts
+│   ├── learning-machine.ts
+│   └── performance-scorer.ts
 ├── lib/
-│   ├── serena-source.ts            # Cliente HTTP Serena API
-│   ├── kph-supabase.ts             # Cliente Supabase kph-os
-│   └── run-agent.ts                # Wrapper de execução + logging
+│   ├── serena-db.ts        # conexão postgres + interfaces TypeScript
+│   └── run-agent.ts        # wrapper que grava em orkestri_runs
 ├── scripts/
-│   └── run-all.ts                  # Entry point (GitHub Actions)
-├── .github/
-│   └── workflows/
-│       └── daily-agents.yml        # Cron 06:00 BRT diário
-├── kph-os-integration.md           # Guia de integração no kph-os
-└── .env.example
+│   └── run-all.ts          # executa os 6 agentes em sequência
+├── .github/workflows/
+│   └── daily-agents.yml    # schedule 06h BRT + workflow_dispatch
+├── .env.example
+├── package.json
+├── tsconfig.json
+└── README.md
 ```
+
+## Variáveis de ambiente
+
+```bash
+cp .env.example .env.local
+# preencher SERENA_DATABASE_URL e ANTHROPIC_API_KEY
+```
+
+| Variável | Descrição |
+|---|---|
+| `SERENA_DATABASE_URL` | Connection string direta ao Postgres da Serena |
+| `ANTHROPIC_API_KEY` | Chave Anthropic (modelo: claude-haiku-4-5-20251001) |
+| `DISCORD_WEBHOOK_ORQUESTRADOR` | Webhook do canal #orquestrador para alertas de falha |
+
+## Como rodar localmente
+
+```bash
+npm install
+cp .env.example .env.local
+
+npm run run:all         # todos os agentes
+npm run run:reservas    # agente individual
+npm run run:funil
+npm run run:nps
+npm run run:handoffs
+npm run run:learning
+npm run run:scorer
+npm run typecheck       # verificar tipos
+```
+
+## GitHub Actions
+
+Schedule: todo dia às 06h BRT (09h UTC).
+
+Secrets necessários no repo GitHub (Settings → Secrets → Actions):
+- `SERENA_DATABASE_URL`
+- `ANTHROPIC_API_KEY`
+- `DISCORD_WEBHOOK_ORQUESTRADOR`
+
+Manual dispatch: Actions → "Orkestri — Serena Daily Agents" → Run workflow → selecionar agente.
+
+## Surface no painel
+
+Os resultados aparecem em `madonna-painel.vercel.app/orkestri`:
+
+- Score comercial com breakdown por componente
+- Insight do dia gerado pelo Haiku
+- Propostas de melhoria (orkestri_learning) com botões Aprovar/Descartar
+- Status da última execução de cada agente
+
+## Roadmap
+
+- [ ] lead_score no funil quando a Serena popular o campo
+- [ ] NPS real via formulário pós-visita (substituir proxy por frequencia_visitas)
+- [ ] Bridge opcional: espelhar módulo `comercial` para o kph-os quando a Serena for integrada ao grupo
+- [ ] Agente de custo de IA (custo_usd diário vs baseline)
+- [ ] Multi-restaurante: onboarding do Meet & Eat
+
+---
+
+Stack: Node.js + TypeScript · Modelo: claude-haiku-4-5-20251001 · DB: Supabase PostgreSQL (fgntcrxuhfwcauvahaiz)

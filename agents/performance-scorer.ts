@@ -1,123 +1,146 @@
 /**
  * performance-scorer
- * Agente orquestrador: executa os 4 agentes, calcula score ponderado final,
- * grava em kph_intelligence_scores e kph_insights.
+ * Lê os últimos runs de orkestri_runs para os agentes 1-4,
+ * calcula score consolidado ponderado, grava em orkestri_scores e orkestri_insights.
  *
- * Pesos: reservas 30%, funil 30%, nps 20%, handoffs 20%
+ * Pesos: reservas 20%, funil 30%, nps 20%, handoffs 30%
  */
 
-import { run as reservasRun } from "./reservas-monitor";
-import { run as funilRun } from "./funil-comercial-analyzer";
-import { run as npsRun } from "./nps-tracker";
-import { run as handoffsRun } from "./handoffs-analyzer";
-import { kphSupabase } from "../lib/kph-supabase";
-import { runAgent, AgentResult } from "../lib/run-agent";
+import 'dotenv/config';
+import Anthropic from '@anthropic-ai/sdk';
+import { sql } from '../lib/serena-db';
+import { runAgent, AgentResult } from '../lib/run-agent';
+
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const WEIGHTS = {
-  reservas: 0.3,
-  funil: 0.3,
-  nps: 0.2,
-  handoffs: 0.2,
+  'reservas-monitor': 0.2,
+  'funil-comercial-analyzer': 0.3,
+  'nps-tracker': 0.2,
+  'handoffs-analyzer': 0.3,
 };
 
-export async function run(): Promise<AgentResult> {
+type AgentKey = keyof typeof WEIGHTS;
+
+interface RunResult {
+  agent_name: string;
+  status: string;
+  result: Record<string, unknown> | null;
+  executed_at: string;
+}
+
+export async function main(): Promise<AgentResult> {
   const generatedAt = new Date().toISOString();
+  const agentNames = Object.keys(WEIGHTS) as AgentKey[];
 
-  console.log("[performance-scorer] Running all sub-agents...");
+  // Buscar último run de sucesso por agente
+  const lastRuns = await sql<RunResult[]>`
+    SELECT DISTINCT ON (agent_name)
+      agent_name,
+      status,
+      result,
+      executed_at::text
+    FROM orkestri_runs
+    WHERE agent_name = ANY(${agentNames})
+      AND status = 'success'
+    ORDER BY agent_name, executed_at DESC
+  `;
 
-  const [reservas, funil, nps, handoffs] = await Promise.allSettled([
-    reservasRun(),
-    funilRun(),
-    npsRun(),
-    handoffsRun(),
-  ]);
-
-  const safeScore = (r: PromiseSettledResult<AgentResult>, fallback = 50): number => {
-    if (r.status === "fulfilled") return r.value.score ?? fallback;
-    console.warn("[performance-scorer] Sub-agent failed:", r.reason);
-    return fallback;
-  };
-
-  const safeInsight = (r: PromiseSettledResult<AgentResult>): string => {
-    if (r.status === "fulfilled") return r.value.insight ?? "";
-    return "";
-  };
-
-  const scores = {
-    reservas: safeScore(reservas),
-    funil: safeScore(funil),
-    nps: safeScore(nps),
-    handoffs: safeScore(handoffs),
-  };
-
-  const finalScore = Math.round(
-    scores.reservas * WEIGHTS.reservas +
-    scores.funil * WEIGHTS.funil +
-    scores.nps * WEIGHTS.nps +
-    scores.handoffs * WEIGHTS.handoffs
-  );
-
-  const insights = [
-    reservas.status === "fulfilled" ? `Reservas: ${safeInsight(reservas)}` : null,
-    funil.status === "fulfilled" ? `Funil: ${safeInsight(funil)}` : null,
-    nps.status === "fulfilled" ? `NPS: ${safeInsight(nps)}` : null,
-    handoffs.status === "fulfilled" ? `Handoffs: ${safeInsight(handoffs)}` : null,
-  ]
-    .filter(Boolean)
-    .join(" | ");
-
-  const breakdown = {
-    reservas: { score: scores.reservas, weight: WEIGHTS.reservas },
-    funil: { score: scores.funil, weight: WEIGHTS.funil },
-    nps: { score: scores.nps, weight: WEIGHTS.nps },
-    handoffs: { score: scores.handoffs, weight: WEIGHTS.handoffs },
-  };
-
-  // Gravar score consolidado
-  const { error: scoreError } = await kphSupabase
-    .from("kph_intelligence_scores")
-    .insert({
-      module: "comercial",
-      score: finalScore,
-      breakdown,
-      generated_at: generatedAt,
-    });
-
-  if (scoreError) {
-    console.error(
-      "[performance-scorer] Failed to write kph_intelligence_scores:",
-      scoreError.message
-    );
+  const runsMap = new Map<string, RunResult>();
+  for (const run of lastRuns) {
+    runsMap.set(run.agent_name, run);
   }
 
-  // Gravar insight consolidado
-  const consolidatedInsight = insights.slice(0, 200);
-  const { error: insightError } = await kphSupabase.from("kph_insights").insert({
-    module: "comercial",
-    insight: consolidatedInsight,
-    score: finalScore,
-    period: "daily",
-    created_at: generatedAt,
+  // Extrair scores — excluir agentes sem run recente da média
+  const breakdown: Record<string, { score: number | null; weight: number; status: string }> = {};
+  let weightedSum = 0;
+  let totalWeight = 0;
+  const ausentes: string[] = [];
+
+  for (const agent of agentNames) {
+    const run = runsMap.get(agent);
+    if (run?.result && typeof run.result === 'object' && 'score' in run.result) {
+      const score = Number(run.result.score);
+      breakdown[agent] = { score, weight: WEIGHTS[agent], status: 'ok' };
+      weightedSum += score * WEIGHTS[agent];
+      totalWeight += WEIGHTS[agent];
+    } else {
+      breakdown[agent] = { score: null, weight: WEIGHTS[agent], status: 'ausente' };
+      ausentes.push(agent);
+    }
+  }
+
+  const finalScore = totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
+
+  if (ausentes.length > 0) {
+    console.warn(`[performance-scorer] Agentes sem run recente: ${ausentes.join(', ')}`);
+  }
+
+  const dadosColetados = {
+    breakdown,
+    ausentes,
+    final_score: finalScore,
+    generated_at: generatedAt,
+    aviso: ausentes.length > 0 ? `Agentes ausentes excluídos da média: ${ausentes.join(', ')}` : null,
+  };
+
+  // Claude Haiku — 1 insight consolidado em português
+  const prompt = `Você é analista sênior de dados do restaurante Madonna Cucina.
+Com base nos scores abaixo, gere 1 insight consolidado em português (máximo 200 chars), direto e acionável.
+Mencione o ponto mais crítico e a ação mais importante.
+
+Scores dos agentes:
+${JSON.stringify(breakdown, null, 2)}
+
+Score final: ${finalScore}/100
+${ausentes.length > 0 ? `Agentes sem dados: ${ausentes.join(', ')}` : ''}
+
+Responda SOMENTE com um JSON: { "insight": "..." }`;
+
+  const response = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 256,
+    messages: [{ role: 'user', content: prompt }],
   });
 
-  if (insightError) {
-    console.error(
-      "[performance-scorer] Failed to write kph_insights:",
-      insightError.message
-    );
+  const text = response.content[0].type === 'text' ? response.content[0].text : '{"insight":""}';
+  let insight = '';
+  try {
+    const parsed = JSON.parse(text) as { insight: string };
+    insight = parsed.insight ?? '';
+  } catch {
+    insight = text.slice(0, 200);
   }
 
-  console.log(
-    `[performance-scorer] Final score: ${finalScore} | Breakdown: ${JSON.stringify(scores)}`
-  );
+  // Gravar em orkestri_scores
+  try {
+    await sql`
+      INSERT INTO orkestri_scores (module, score, breakdown, generated_at)
+      VALUES ('comercial', ${finalScore}, ${sql.json(breakdown as never)}, NOW())
+    `;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[performance-scorer] Failed to write orkestri_scores:', msg);
+  }
+
+  // Gravar em orkestri_insights
+  try {
+    await sql`
+      INSERT INTO orkestri_insights (module, insight, score, period)
+      VALUES ('comercial', ${insight}, ${finalScore}, 'daily')
+    `;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[performance-scorer] Failed to write orkestri_insights:', msg);
+  }
 
   return {
     score: finalScore,
-    insight: consolidatedInsight,
-    data: { breakdown, scores, generated_at: generatedAt },
+    insight,
+    data: dadosColetados,
   };
 }
 
 if (require.main === module) {
-  runAgent("performance-scorer", run).catch(console.error);
+  runAgent('performance-scorer', 'comercial', main).then(() => process.exit(0)).catch(console.error);
 }

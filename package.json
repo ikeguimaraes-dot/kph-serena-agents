@@ -1,18 +1,24 @@
 {
   "name": "kph-serena-agents",
   "version": "1.0.0",
-  "description": "Agentes de IA que lêem dados da Serena (API REST) e gravam resultados no Supabase kph-os",
   "scripts": {
-    "dev": "npx ts-node scripts/run-all.ts",
-    "build": "tsc"
+    "run:all": "ts-node scripts/run-all.ts",
+    "run:reservas": "ts-node agents/reservas-monitor.ts",
+    "run:funil": "ts-node agents/funil-comercial-analyzer.ts",
+    "run:nps": "ts-node agents/nps-tracker.ts",
+    "run:handoffs": "ts-node agents/handoffs-analyzer.ts",
+    "run:learning": "ts-node agents/learning-machine.ts",
+    "run:scorer": "ts-node agents/performance-scorer.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.40.0",
-    "@supabase/supabase-js": "^2.49.0"
+    "@anthropic-ai/sdk": "^0.36.0",
+    "dotenv": "^16.0.0",
+    "postgres": "^3.4.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.8.3"
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
   }
 }

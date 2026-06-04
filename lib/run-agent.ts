@@ -1,83 +1,64 @@
-import { kphSupabase } from "./kph-supabase";
+import { sql } from './serena-db';
 
 export interface AgentResult {
-  score: number;
-  insight: string;
-  data: Record<string, unknown>;
+  score?: number;
+  insight?: string;
+  data?: unknown;
 }
 
 /**
- * Registra a execução de um agente em `agent_runs` no Supabase kph-os
- * e notifica o endpoint POST https://kph-os.vercel.app/api/agents/run.
- *
- * Em caso de erro: status='error', result.error = mensagem.
+ * Wrapper que grava execução em orkestri_runs.
+ * 1. Insere row com status='running'
+ * 2. Executa fn()
+ * 3. UPDATE status='success', result=resultado
+ * 4. Em caso de erro: UPDATE status='error', result={error: msg}
+ * Nunca lança exceção — sempre captura e grava.
  */
 export async function runAgent(
   agentName: string,
+  module: string,
   fn: () => Promise<AgentResult>
 ): Promise<void> {
-  const executedAt = new Date().toISOString();
-  let status: "success" | "error" = "success";
-  let result: AgentResult | { error: string } = { score: 0, insight: "", data: {} };
+  let runId: number | null = null;
 
-  console.log(`[${agentName}] Starting at ${executedAt}`);
+  // 1. Inserir com status 'running'
+  try {
+    const rows = await sql<{ id: number }[]>`
+      INSERT INTO orkestri_runs (module, agent_name, status, executed_at)
+      VALUES (${module}, ${agentName}, 'running', NOW())
+      RETURNING id
+    `;
+    runId = rows[0]?.id ?? null;
+  } catch (insertErr) {
+    const msg = insertErr instanceof Error ? insertErr.message : String(insertErr);
+    console.error(`[${agentName}] Failed to insert orkestri_runs row:`, msg);
+  }
+
+  // 2. Executar fn()
+  let status: 'success' | 'error' = 'success';
+  let result: AgentResult | { error: string } = {};
 
   try {
     result = await fn();
-    console.log(`[${agentName}] Score: ${(result as AgentResult).score}`);
-    console.log(`[${agentName}] Insight: ${(result as AgentResult).insight}`);
+    console.log(`[${agentName}] done ✓  score=${(result as AgentResult).score ?? 'n/a'}`);
   } catch (err) {
-    status = "error";
-    const message = err instanceof Error ? err.message : String(err);
-    result = { error: message };
-    console.error(`[${agentName}] Error:`, message);
+    status = 'error';
+    const msg = err instanceof Error ? err.message : String(err);
+    result = { error: msg };
+    console.error(`[${agentName}] error ✗`, msg);
   }
 
-  // Gravar em agent_runs
-  const { error: dbError } = await kphSupabase.from("agent_runs").insert({
-    module: "comercial",
-    agent_name: agentName,
-    status,
-    result,
-    executed_at: executedAt,
-  });
-
-  if (dbError) {
-    console.error(`[${agentName}] Failed to write agent_runs:`, dbError.message);
-  }
-
-  // Notificar endpoint kph-os
-  try {
-    const apiUrl = process.env.KPH_OS_URL ?? "https://kph-os.vercel.app";
-    const res = await fetch(`${apiUrl}/api/agents/run`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(process.env.KPH_API_SECRET
-          ? { Authorization: `Bearer ${process.env.KPH_API_SECRET}` }
-          : {}),
-      },
-      body: JSON.stringify({
-        module: "comercial",
-        agent_name: agentName,
-        status,
-        result,
-        executed_at: executedAt,
-      }),
-    });
-    if (!res.ok) {
-      console.warn(
-        `[${agentName}] kph-os notify returned ${res.status}`
-      );
+  // 3/4. UPDATE orkestri_runs
+  if (runId !== null) {
+    try {
+      await sql`
+        UPDATE orkestri_runs
+        SET status = ${status}, result = ${sql.json(result as never)}
+        WHERE id = ${runId}
+      `;
+    } catch (updateErr) {
+      const msg = updateErr instanceof Error ? updateErr.message : String(updateErr);
+      console.error(`[${agentName}] Failed to update orkestri_runs:`, msg);
     }
-  } catch (notifyErr) {
-    console.warn(
-      `[${agentName}] Failed to notify kph-os:`,
-      notifyErr instanceof Error ? notifyErr.message : String(notifyErr)
-    );
-  }
-
-  if (status === "error") {
-    process.exit(1);
   }
 }
