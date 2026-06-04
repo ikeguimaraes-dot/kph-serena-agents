@@ -1,0 +1,18 @@
+{
+  "name": "kph-serena-agents",
+  "version": "1.0.0",
+  "description": "Agentes de IA que lêem dados da Serena (API REST) e gravam resultados no Supabase kph-os",
+  "scripts": {
+    "dev": "npx ts-node scripts/run-all.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "@supabase/supabase-js": "^2.49.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}

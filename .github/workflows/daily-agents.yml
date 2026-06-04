@@ -1,0 +1,33 @@
+name: Daily Serena Agents
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # 06:00 BRT (UTC-3)
+  workflow_dispatch:
+
+jobs:
+  run-agents:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Run agents
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          KPH_SUPABASE_URL: ${{ secrets.KPH_SUPABASE_URL }}
+          KPH_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.KPH_SUPABASE_SERVICE_ROLE_KEY }}
+          SERENA_API_URL: ${{ secrets.SERENA_API_URL }}
+          SERENA_API_KEY: ${{ secrets.SERENA_API_KEY }}
+          KPH_API_SECRET: ${{ secrets.KPH_API_SECRET }}
+        run: npx ts-node scripts/run-all.ts
+      - name: Notify Discord on failure
+        if: failure()
+        run: |
+          curl -X POST "${{ secrets.DISCORD_WEBHOOK_ORQUESTRADOR }}" \
+            -H "Content-Type: application/json" \
+            -d '{"content":"⚠️ **kph-serena-agents** falhou em `'"$(date -u)"'`. Verifique os logs."}'
