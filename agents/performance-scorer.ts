@@ -103,7 +103,8 @@ Responda SOMENTE com um JSON: { "insight": "..." }`;
     messages: [{ role: 'user', content: prompt }],
   });
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : '{"insight":""}';
+  const raw = response.content[0].type === 'text' ? response.content[0].text : '{"insight":""}';
+  const text = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
   let insight = '';
   try {
     const parsed = JSON.parse(text) as { insight: string };
