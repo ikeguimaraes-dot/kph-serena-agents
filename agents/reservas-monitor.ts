@@ -116,7 +116,8 @@ Responda SOMENTE com JSON válido, sem markdown.`;
     messages: [{ role: 'user', content: prompt }],
   });
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : '';
+  const raw = response.content[0].type === 'text' ? response.content[0].text : '';
+  const text = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
   const parsed = JSON.parse(text) as AgentResult;
   return parsed;
 }
