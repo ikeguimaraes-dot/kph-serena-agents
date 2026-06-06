@@ -1,0 +1,53 @@
+name: Orkestri — Weekly Report
+
+on:
+  schedule:
+    - cron: '0 23 * * 0'  # Domingo 20h BRT (23h UTC)
+  workflow_dispatch:
+    inputs:
+      dias:
+        description: 'Janela em dias (padrão: 7)'
+        required: false
+        default: '7'
+
+jobs:
+  weekly-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger weekly report
+        run: |
+          DIAS="${{ github.event.inputs.dias || '7' }}"
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ secrets.SERENA_BACKEND_URL }}/api/serena/weekly-report?dias=${DIAS}" \
+            -H "x-admin-secret: ${{ secrets.SERENA_ADMIN_SECRET }}" \
+            -H "Content-Type: application/json" \
+            --max-time 120)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -1)
+
+          echo "HTTP $HTTP_CODE"
+          echo "$BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Weekly report falhou com HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+          # Extrai summary e id para notificação
+          REPORT_ID=$(echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','?'))" 2>/dev/null || echo "?")
+          echo "Relatório gerado: id=$REPORT_ID"
+
+      - name: Notify Discord on success
+        if: success()
+        run: |
+          curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_ORQUESTRADOR }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"📊 **Relatório semanal Serena gerado** — enviado para ikeguimaraes@gmail.com\\nVer no painel: https://madonna-painel.vercel.app/admin/serena?tab=weekly\"}"
+
+      - name: Notify Discord on failure
+        if: failure()
+        run: |
+          curl -s -X POST "${{ secrets.DISCORD_WEBHOOK_ORQUESTRADOR }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"❌ **Weekly report FALHOU** — verificar logs\\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>\"}"
