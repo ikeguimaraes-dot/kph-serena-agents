@@ -44,6 +44,9 @@ jobs:
           SERENA_DATABASE_URL: ${{ secrets.SERENA_DATABASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DISCORD_WEBHOOK_ORQUESTRADOR: ${{ secrets.DISCORD_WEBHOOK_ORQUESTRADOR }}
+          # Sprint Orkestri — clusterização ao final do run (learning-machine)
+          ADMIN_SECRET: ${{ secrets.SERENA_ADMIN_SECRET }}
+          SERENA_API_URL: ${{ secrets.SERENA_BACKEND_URL }}
 
       - name: Notify Discord on failure
         if: failure()
