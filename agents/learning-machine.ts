@@ -220,6 +220,26 @@ REGRAS:
     }
   }
 
+  // ── 9. Clusterizar propostas (mantém o mapa agrupado da UI atualizado) ─────
+  // Chama o endpoint da Serena ao final do run. Não-fatal: as propostas já foram
+  // inseridas; se a clusterização falhar, ela roda no próximo run ou manualmente.
+  try {
+    const base = process.env.SERENA_API_URL ?? 'https://restaurant-ai-production-bb5d.up.railway.app';
+    const secret = process.env.ADMIN_SECRET ?? '';
+    const resp = await fetch(`${base}/api/restaurants/meet_and_eat/orkestri/clusterizar`, {
+      method: 'POST',
+      headers: { 'x-admin-secret': secret },
+    });
+    console.log(
+      resp.ok
+        ? '[learning-machine] clusterizacao disparada OK'
+        : `[learning-machine] clusterizacao retornou ${resp.status}`
+    );
+  } catch (err) {
+    console.error('[learning-machine] clusterizacao falhou (nao-fatal):',
+      err instanceof Error ? err.message : String(err));
+  }
+
   return {
     score: Math.min(100, inseridas * 20),
     insight: `${inseridas} proposta(s) de melhoria gerada(s) e salva(s) em orkestri_learning.`,
